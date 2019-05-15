@@ -3,7 +3,7 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: 'Spot instances auto-deregister from ECS cluster'
 
 Resources:
-  EventRule:
+  SpotInstanceInterruptionEventRule:
     Type: AWS::Events::Rule
     Properties:
       Description: Spot Instance Interruption Warning
@@ -18,13 +18,36 @@ Resources:
           Arn: !GetAtt LambdaFunction.Arn
           Id: "TargetFunctionV1"
 
-  PermissionForEventsToInvokeLambda: 
+  Ec2ScaleinEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: AutoScaling Group Scale in
+      EventPattern:
+        source:
+          - "aws.autoscaling"
+        detail-type:
+          - "EC2 Instance-terminate Lifecycle Action"
+      State: "ENABLED"
+      Targets:
+        -
+          Arn: !GetAtt LambdaFunction.Arn
+          Id: "TargetFunctionV1"
+
+  PermissionForSpotInstanceInterruptionEventToInvokeLambda:
     Type: AWS::Lambda::Permission
     Properties: 
       FunctionName: !Ref LambdaFunction
       Action: "lambda:InvokeFunction"
       Principal: "events.amazonaws.com"
-      SourceArn: !GetAtt EventRule.Arn
+      SourceArn: !GetAtt SpotInstanceInterruptionEventRule.Arn
+
+  PermissionForEc2ScaleinEventToInvokeLambda:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref LambdaFunction
+      Action: "lambda:InvokeFunction"
+      Principal: "events.amazonaws.com"
+      SourceArn: !GetAtt Ec2ScaleinEventRule.Arn
 
   LambdaFunction:
     Type: "AWS::Lambda::Function"
@@ -40,6 +63,9 @@ Resources:
           region = os.getenv('AWS_DEFAULT_REGION')
           logger = logging.getLogger()
           logger.setLevel(logging.INFO)
+
+          EVENT_TYPE_INTERRUPTION_WARNING = "EC2 Spot Instance Interruption Warning"
+          EVENT_TYPE_TERMINATION_LIFECYCLE_ACTION = "EC2 Instance-terminate Lifecycle Action"
 
 
           class ECS():
@@ -82,12 +108,19 @@ Resources:
                       else:
                           logger.debug(f'{instance_id} is not used in {cluster_arn}')
                   if not container_instance_arn:
-                      logger.warning('{0} is not used in all ecs clusters'.format(instance_id))
+                      logger.warning(f'{instance_id} is not used in all ecs clusters')
 
 
           def handler(event, context):
-              instance_id = event['detail']['instance-id']
-              logger.info('{0} will be terminated in 2 minutes'.format(instance_id))
+              if event['detail-type'] == EVENT_TYPE_INTERRUPTION_WARNING:
+                  instance_id = event['detail']['instance-id']
+                  logger.info(f'{instance_id} will be terminated in 2 minutes because of spot instance interruption.')
+              elif event['detail-type'] == EVENT_TYPE_TERMINATION_LIFECYCLE_ACTION:
+                  instance_id = event['detail']['EC2InstanceId']
+                  logger.info(f'{instance_id} will be terminated because of scale in.')
+              else:
+                  logger.error(f'Unknown event type: {event}')
+                  return
               ecs = ECS(region)
               ecs.deregister(instance_id)
 
